@@ -1,0 +1,6 @@
+# The deployed bundle is compared byte for byte against a freshly generated
+# one by test_bundles.py, so these files have to keep LF endings on every
+# machine. Without this, a Windows clone gets CRLF and that test fails for a
+# reason that has nothing to do with the contract.
+* text=auto eol=lf
+*.png binary

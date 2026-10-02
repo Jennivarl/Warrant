@@ -1,0 +1,14 @@
+{
+  "name": "warrant",
+  "private": true,
+  "type": "module",
+  "description": "Deploy and demo scripts for the WARRANT intelligent contract",
+  "scripts": {
+    "demo": "node deploy/demo.mjs"
+  },
+  "dependencies": {
+    "ethers": "6.17.0",
+    "genlayer-js": "2.0.0-rc.1",
+    "viem": "2.57.2"
+  }
+}
