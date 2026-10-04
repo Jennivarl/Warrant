@@ -108,8 +108,10 @@ function checkValueMoved(step, wasState, nowState, expected, before, after) {
   // Only a deal that left `open` during this call should have moved money.
   // A deal that was already decided is expected to revert and move nothing.
   if (wasState !== "open") {
-    if (moved === 0n) console.log(`nothing moved, which is correct: the deal was already ${wasState}`);
-    else console.log(`WARNING: the deal was already ${wasState} and the balance still moved by ${fmt(moved)}`);
+    // A refused call still costs the sender a fee, and the sender is often
+    // the depositor, so a small drop here is gas rather than a payout.
+    if (moved <= 0n) console.log(`no payout, which is correct: the deal was already ${wasState}`);
+    else console.log(`WARNING: the deal was already ${wasState} and the balance still rose by ${fmt(moved)}`);
     return;
   }
   if (nowState !== decided) {

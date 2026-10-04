@@ -106,69 +106,15 @@ Every row is a real transaction against the contract above.
 
 | step | transaction | outcome |
 |---|---|---|
-| Deploy | [`0x4d14dbeb...`](https://explorer-studio-dev.genlayer.com/tx/0x4d14dbeb1c538f4c9c3743c54e5b5eb41724b021ed8ee2b2bc5bfcd4374a805a) | contract live, source byte-identical to the bundle in this repo |
-| Open a 1 GEN deal on two conditions | [`0x21da0dcd...`](https://explorer-studio-dev.genlayer.com/tx/0x21da0dcdeccad95b88ead3d3a170b0a71df00010fc2e92f01f7e85ddd939f431) | `incident.impact eq critical; incident.status eq resolved`. Both field names were checked against SIGNAL cross-contract before the deposit was accepted |
-| Open a 0.5 GEN deal whose second condition is false | [`0x5db4e24d...`](https://explorer-studio-dev.genlayer.com/tx/0x5db4e24dbe02bebb3e8ea6fa2e27bf1d35397b7806481fbeb7642da010c54028) | `incident.impact eq critical; incident.status eq investigating` |
-| Open a deal naming a field the feed does not publish | [`0xc08b7d6b...`](https://explorer-studio-dev.genlayer.com/tx/0xc08b7d6b0a1674097343fa63b2e11fad75922cd419f932662561b640e639e761) | **refused**, `that feed does not publish the field incident.severity`. The deposit was never accepted and `committed` did not move. A typo that would have meant "never pays" was caught at the counter |
-| Release 59 seconds after the reading | [`0x7b188f02...`](https://explorer-studio-dev.genlayer.com/tx/0x7b188f024b99a691052ef8bec038c4d7b598cc76ec907fd4c06f3e9b71220c5f) | **refused**: `the reading is 59 seconds old and must be 3600 before it can pay`. Deal still open, beneficiary still 0.000000 GEN |
-| Release once the reading had settled | [`0x66cbc8d1...`](https://explorer-studio-dev.genlayer.com/tx/0x66cbc8d1648520710ccb4a9c8ff5db6ae552c448434289be821ae6b8f1e73b8d) | **paid**: the beneficiary went from 0.000000 to exactly 1.000000 GEN. `saw critical; resolved`, reason `every condition holds: critical; resolved`, and `committed` fell from 1.5 to 0.5 GEN |
-| Release the same deal again | [`0xa276db11...`](https://explorer-studio-dev.genlayer.com/tx/0xa276db118de97c341ac2f8cb3b52077799eb2595f58f4fb25cb02bf309868c3a) | **reverted**, `deal is already paid: 0xb428...a75a:outage`. The beneficiary still holds exactly 1.000000 GEN |
-| Release the deal whose second condition is false | [`0xee9be0e3...`](https://explorer-studio-dev.genlayer.com/tx/0xee9be0e3a030bc087a505524d2948887e63ff0e64fad1c055ee5fd15a1bf23bf) | **refused and said which**: `incident.status is resolved, which is not eq investigating`. The first condition held. Deal still open, nothing moved, and this returned normally rather than erroring, because a condition that does not hold is not a fault |
-| Refund that deal before its deadline | [`0x98c1faac...`](https://explorer-studio-dev.genlayer.com/tx/0x98c1faac33e7f097145a0d71102432d2a13207ac776291b46ac13157d2e6690e) | **refused**, `the deadline has not passed yet` |
+| Deploy | [`0x117472d8...`](https://explorer-studio-dev.genlayer.com/tx/0x117472d8d510cfd1393ec7991f7cf9e2e10bdc46eacbddf978529bb0357c4833) | contract live, source byte-identical to the bundle in this repo |
+| Open a 1 GEN deal on two conditions | [`0xa0eb1fb6...`](https://explorer-studio-dev.genlayer.com/tx/0xa0eb1fb69b0a49db643ac29a2abe113874508acd8beb63d5c5b37ca017446e65) | `incident.impact eq critical; incident.status eq resolved`, covering to 2026-12-31. The contract derived the claim deadline itself, 2027-01-01, and checked both field names against SIGNAL cross-contract before accepting the deposit |
+| Release it | [`0x9c3f93d8...`](https://explorer-studio-dev.genlayer.com/tx/0x9c3f93d893b4f2bdfd406900ce7b415b8de36adfc28c2d0d311c5c69a5c1db12) | **paid**: the beneficiary rose by exactly 1.000000 GEN. `saw critical; resolved`, reason `every condition holds: critical; resolved`, and `committed` fell to 0 |
+| Release the same deal again | [`0xa232fed7...`](https://explorer-studio-dev.genlayer.com/tx/0xa232fed7f76264dba6afe65fa254e7be0c7e3845f6cd4548eac722508882115a) | **rolled back**, `deal is already paid`. Nothing moved |
+| Refund a deal that already paid | [`0xaf1d94da...`](https://explorer-studio-dev.genlayer.com/tx/0xaf1d94daeae0327656bc72fde136c1f1a495c448313cecee2f98f1c2817f5306) | **rolled back**, `deal is already paid`. A deal leaves `open` exactly once, by exactly one route |
 
-The reading both deals are decided against was taken by SIGNAL at `2026-10-02T16:07:58Z`: [`0x872aaa90...`](https://explorer-studio-dev.genlayer.com/tx/0x872aaa904ce052c77afaa1e484fd68b9ed626d52226414f70f46270c63e0e5c5). Every validator fetched `https://www.githubstatus.com/api/v2/incidents/zkxwbgr0cnmx.json` and agreed that GitHub rated that incident `critical` and marked it `resolved`.
+The reading it was decided against was taken by SIGNAL at `2026-10-04T22:22:39Z`: [`0x1a9ac4c8...`](https://explorer-studio-dev.genlayer.com/tx/0x1a9ac4c8c63f69440b17d2529b5bdfe2b86a3b72f25cff6f5268939685f6ff61). Every validator fetched `https://www.githubstatus.com/api/v2/incidents/zkxwbgr0cnmx.json` and agreed that GitHub rated that incident `critical` and marked it `resolved`.
 
-The beneficiary `0x0f358a8ae1EFc8eBf5a456bf92101f4d33Da33bE` was a freshly generated address holding nothing, so the payout is provable as an amount rather than as a log line.
-
----
-
-## One way out at a time, and nothing stranded
-
-Two rules have to hold together, and naively they fight each other.
-
-A deposit must never be claimable by both sides at once, so `release` has to close on exactly the boundary `refund` opens. And a reading needs an hour to settle before it can pay, so that value never moves on a reading consensus could still take back.
-
-Put those together with a deadline the depositor types in, and the last hour before it becomes dead: a reading that arrives then can never settle in time, and a deposit that should have paid refunds instead.
-
-So the deadline is not asked for. The depositor says what period they want covered, and the contract derives the claim deadline one day later:
-
-```
-open_deal(..., covers_until="2026-10-31")   ->   covers to 2026-10-31, claim by 2026-11-01
-```
-
-| moment | release | refund |
-|---|---|---|
-| during the cover period | open | shut |
-| the claim day after it | open | shut |
-| from midnight after that, forever | shut | open |
-
-That gives three properties, each held by tests:
-
-- **Exactly one transition is available at any moment.** Never both, so the two can never race for the same deposit. Never neither, so a deposit is always claimable by someone. The suite sweeps that boundary with a fresh deal at each instant.
-- **Nothing inside the cover period is ever stranded.** A reading taken in the final second of the period still settles an hour later and has the rest of the claim day to be paid. Tested from the first second of cover to the last.
-- **A reading taken after the period cannot pay.** It may be perfectly true about the world, and it says nothing about this deal. The deal's own terms decide what counts, not when somebody happens to call `release`.
-
-An expired deal is refused before SIGNAL is even consulted, so it costs no cross-contract call and no late reading can influence it.
-
-The date arithmetic this rests on is integer only with no library, because every validator has to produce the same answer. It is checked against the standard library on every day from 2020 to 2031.
-
----
-
-## Paying a wallet needs the fee reserved up front
-
-This is the part that is easy to get wrong, and getting it wrong is how an escrow ends up recording a payout it never made.
-
-A transfer out of the contract is an **external message**, and the transaction has to carry a funded allocation for it. Neither fee estimator produces one on its own, so it has to be declared. Three attempts at the same payout, in order:
-
-| attempt | transaction | result |
-|---|---|---|
-| No allocation at all | [`0xcd34bdfb...`](https://explorer-studio-dev.genlayer.com/tx/0xcd34bdfb1f334dfbc71d3e1f2d027d4b263ab3f268b845bbfb0bf23023078cfb) | `out_of message_fee total # external`, `message_allocations_count: 0` |
-| An allocation, but priced by the write estimator | [`0x47f4bc69...`](https://explorer-studio-dev.genlayer.com/tx/0x47f4bc698f1f65276918124da0ee03ba5b48780ef0b813abe16be8584b5a125b) | `out_of message_fee total # external`, `message_allocations_count: 1`. The allocation was accepted and `totalMessageFees` was still 0, so nothing stood behind it |
-| An allocation priced by `estimateTransactionFees` | [`0x66cbc8d1...`](https://explorer-studio-dev.genlayer.com/tx/0x66cbc8d1648520710ccb4a9c8ff5db6ae552c448434289be821ae6b8f1e73b8d) | paid |
-
-Two things were needed. The allocation must carry a non-zero `budget`, because a zero one is rejected as `ExternalAllocationInvalid`. And it must be priced by `client.estimateTransactionFees({ messageAllocations })`, not by `estimateTransactionFeesForWrite`, which accepts the allocation and still reports `totalMessageFees: 0`. [`deploy/chain.mjs`](deploy/chain.mjs) and [`deploy/demo.mjs`](deploy/demo.mjs) do both.
-
-**The contract was never at risk through any of this.** Each failed attempt reverted whole: the deal stayed `open`, `committed` did not move, and no state recorded a payout that had not happened. That is what changing state before moving value buys, and it is why `deploy/demo.mjs` also checks the recipient's balance against the deposit after every decision rather than trusting the receipt.
+The beneficiary `0x0f358a8ae1EFc8eBf5a456bf92101f4d33Da33bE` was generated fresh for these runs, so a payout is provable as an amount rather than as a log line.
 
 ---
 
