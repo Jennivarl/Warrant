@@ -156,7 +156,7 @@ def open_deal(vm, warrant, name="d1", who=DEPOSITOR, amount=DEPOSIT, **kw):
         feed_id=FEED,
         key=KEY,
         conditions="incident.impact eq critical",
-        deadline="2026-10-31",
+        covers_until="2026-10-31",
     )
     args.update(kw)
     vm.value = amount
@@ -223,12 +223,19 @@ def test_more_conditions_than_a_deal_may_carry_are_refused(direct_vm, warrant):
 @pytest.mark.parametrize("deadline", ["31-10-2026", "2026-13-01", "nope", "2026-10-1"])
 def test_a_deadline_that_is_not_a_date_is_refused(direct_vm, warrant, deadline):
     with direct_vm.expect_revert("YYYY-MM-DD"):
-        open_deal(direct_vm, warrant, deadline=deadline)
+        open_deal(direct_vm, warrant, covers_until=deadline)
 
 
-def test_a_deadline_in_the_past_is_refused(direct_vm, warrant):
-    with direct_vm.expect_revert("must be in the future"):
-        open_deal(direct_vm, warrant, deadline="2026-09-01")
+def test_a_cover_period_that_is_already_over_is_refused(direct_vm, warrant):
+    with direct_vm.expect_revert("must not already be over"):
+        open_deal(direct_vm, warrant, covers_until="2026-09-01")
+
+
+def test_a_cover_period_ending_today_is_allowed(direct_vm, warrant):
+    """Today is still a day something can be read on, and the claim runs to tomorrow."""
+    got = open_deal(direct_vm, warrant, covers_until=OPENED[:10])
+    assert got["covers_until"] == OPENED[:10]
+    assert got["deadline"] == "2026-10-02"
 
 
 def test_a_field_the_feed_does_not_publish_is_refused_at_the_counter(direct_vm, warrant, oracle):
@@ -361,7 +368,7 @@ def test_the_deadline_day_itself_is_still_claimable(direct_vm, warrant, oracle):
 
 def test_after_the_deadline_the_deposit_goes_back_to_whoever_put_it_up(direct_vm, warrant, oracle):
     open_deal(direct_vm, warrant)
-    set_date(direct_vm, "2026-11-01T00:00:01Z")
+    set_date(direct_vm, "2026-11-02T00:00:01Z")
     got = warrant.refund("0x" + DEPOSITOR.hex() + ":d1")
 
     assert got["state"] == "refunded"
@@ -372,7 +379,7 @@ def test_after_the_deadline_the_deposit_goes_back_to_whoever_put_it_up(direct_vm
 def test_a_refunded_deal_cannot_then_be_released(direct_vm, warrant, oracle):
     open_deal(direct_vm, warrant)
     deal_id = "0x" + DEPOSITOR.hex() + ":d1"
-    set_date(direct_vm, "2026-11-01T00:00:00Z")
+    set_date(direct_vm, "2026-11-02T00:00:00Z")
     warrant.refund(deal_id)
     with direct_vm.expect_revert("already refunded"):
         released(direct_vm, warrant, deal_id)
@@ -383,7 +390,7 @@ def test_a_paid_deal_cannot_then_be_refunded(direct_vm, warrant, oracle):
     open_deal(direct_vm, warrant)
     deal_id = "0x" + DEPOSITOR.hex() + ":d1"
     released(direct_vm, warrant, deal_id)
-    set_date(direct_vm, "2026-11-01T00:00:00Z")
+    set_date(direct_vm, "2026-11-02T00:00:00Z")
     with direct_vm.expect_revert("already paid"):
         warrant.refund(deal_id)
     assert len(oracle.transfers) == 1
@@ -606,8 +613,167 @@ def test_a_deal_already_decided_cannot_be_counted_twice(direct_vm, warrant, orac
 
     with direct_vm.expect_revert("already paid"):
         warrant.release(deal_id)
-    set_date(direct_vm, "2026-11-01T00:00:01Z")
+    set_date(direct_vm, "2026-11-02T00:00:01Z")
     with direct_vm.expect_revert("already paid"):
         warrant.refund(deal_id)
     assert warrant.reserves()["committed"] == "0"
     assert len(oracle.transfers) == 1
+
+
+# --------------------------------------------------------------------
+# exactly one way out at a time
+#
+# `refund` opens strictly after the deadline day. If `release` stayed open
+# too, then from that moment whoever called first would decide where the
+# money went, which is a race over somebody's deposit. These pin the two
+# transitions to the same boundary, from both sides.
+# --------------------------------------------------------------------
+
+COVERS = "2026-10-31"            # what open_deal covers by default
+DEADLINE = "2026-11-01"          # the claim deadline the contract derives
+ON_DEADLINE = "2026-11-01T23:59:59Z"
+PAST_DEADLINE = "2026-11-02T00:00:00Z"
+
+
+def test_a_deal_still_pays_on_its_deadline_day(direct_vm, warrant, oracle):
+    """The deadline day itself is still claimable, right up to the last second."""
+    open_deal(direct_vm, warrant)
+    set_date(direct_vm, ON_DEADLINE)
+
+    got = warrant.release("0x" + DEPOSITOR.hex() + ":d1")
+    assert got["state"] == "paid"
+    assert oracle.transfers == [{"to": BENEFICIARY, "value": DEPOSIT, "kind": EVM_PAY}]
+
+
+def test_a_deal_cannot_pay_once_the_deadline_has_passed(direct_vm, warrant, oracle):
+    """Even with every condition satisfied, the deposit is the depositor's now."""
+    open_deal(direct_vm, warrant)
+    set_date(direct_vm, PAST_DEADLINE)
+
+    with direct_vm.expect_revert("can only be refunded"):
+        warrant.release("0x" + DEPOSITOR.hex() + ":d1")
+    assert oracle.transfers == []
+    assert warrant.get_deal("0x" + DEPOSITOR.hex() + ":d1")["state"] == "open"
+    assert warrant.reserves()["committed"] == str(DEPOSIT)
+
+
+def test_the_refusal_names_the_deadline_and_the_way_out(direct_vm, warrant):
+    open_deal(direct_vm, warrant)
+    set_date(direct_vm, PAST_DEADLINE)
+
+    with direct_vm.expect_revert(DEADLINE):
+        warrant.release("0x" + DEPOSITOR.hex() + ":d1")
+
+
+@pytest.mark.parametrize(
+    "when,releasable,refundable",
+    [
+        (OPENED, True, False),
+        (ON_DEADLINE, True, False),
+        (PAST_DEADLINE, False, True),
+        ("2026-12-25T12:00:00Z", False, True),
+    ],
+)
+def test_exactly_one_transition_is_available_at_any_moment(
+    direct_vm, warrant, oracle, when, releasable, refundable
+):
+    """
+    The property the two rules exist to give: never both, never neither.
+    A deposit is always claimable by exactly one side.
+    """
+    open_deal(direct_vm, warrant)
+    set_date(direct_vm, when)
+    deal_id = "0x" + DEPOSITOR.hex() + ":d1"
+
+    assert releasable != refundable, "the two must never both be open or both be shut"
+
+    if releasable:
+        with direct_vm.expect_revert("deadline has not passed"):
+            warrant.refund(deal_id)
+    else:
+        with direct_vm.expect_revert("can only be refunded"):
+            warrant.release(deal_id)
+
+
+def test_an_expired_deal_never_even_asks_the_oracle(direct_vm, warrant, oracle):
+    """
+    The deadline is checked before SIGNAL is consulted, so an expired deal
+    costs no cross-contract call and cannot be influenced by a late reading.
+    """
+    open_deal(direct_vm, warrant)
+    oracle.views.clear()
+    set_date(direct_vm, PAST_DEADLINE)
+
+    with direct_vm.expect_revert("can only be refunded"):
+        warrant.release("0x" + DEPOSITOR.hex() + ":d1")
+    assert [v for v in oracle.views if v["method"] == "get_reading"] == []
+
+
+def test_an_expired_deal_refunds_and_then_cannot_be_released(direct_vm, warrant, oracle):
+    """The whole lifecycle, end to end, on the far side of the deadline."""
+    deal_id = "0x" + DEPOSITOR.hex() + ":d1"
+    open_deal(direct_vm, warrant)
+    set_date(direct_vm, PAST_DEADLINE)
+
+    got = warrant.refund(deal_id)
+    assert got["state"] == "refunded"
+    assert oracle.transfers == [{"to": DEPOSITOR, "value": DEPOSIT, "kind": EVM_PAY}]
+    assert warrant.reserves()["committed"] == "0"
+
+    with direct_vm.expect_revert("already refunded"):
+        warrant.release(deal_id)
+    assert len(oracle.transfers) == 1
+
+
+# --------------------------------------------------------------------
+# where the settling hour meets the deadline
+#
+# Closing `release` at the deadline has a consequence worth stating out
+# loud rather than discovering: a reading needs an hour to settle, so the
+# last reading that can ever pay is one taken an hour before the deadline
+# day ends. The money goes back to the depositor, which is the safe
+# direction, but a depositor should know the effective cutoff.
+# --------------------------------------------------------------------
+
+
+def test_a_reading_in_the_final_hour_of_cover_still_pays(direct_vm, warrant, oracle):
+    """
+    The reason the claim deadline is derived rather than asked for. This
+    reading lands half an hour before the cover period ends and settles half
+    an hour after it, and it still has the whole claim day to be paid.
+    """
+    open_deal(direct_vm, warrant)
+    oracle.set_reading(read_at="2026-10-31T23:30:00Z")
+    set_date(direct_vm, "2026-11-01T00:30:01Z")
+
+    got = warrant.release("0x" + DEPOSITOR.hex() + ":d1")
+    assert got["state"] == "paid"
+    assert oracle.transfers == [{"to": BENEFICIARY, "value": DEPOSIT, "kind": EVM_PAY}]
+
+
+def test_the_very_last_second_of_cover_still_pays(direct_vm, warrant, oracle):
+    """Nothing inside the period a depositor bought is ever stranded."""
+    open_deal(direct_vm, warrant)
+    oracle.set_reading(read_at="2026-10-31T23:59:59Z")
+    set_date(direct_vm, "2026-11-01T01:00:00Z")
+
+    assert warrant.release("0x" + DEPOSITOR.hex() + ":d1")["state"] == "paid"
+
+
+def test_a_reading_taken_after_the_cover_period_does_not_pay(direct_vm, warrant, oracle):
+    """True about the world, but not about this deal."""
+    open_deal(direct_vm, warrant)
+    oracle.set_reading(read_at="2026-11-01T00:00:01Z")
+    set_date(direct_vm, "2026-11-01T02:00:00Z")
+
+    got = warrant.release("0x" + DEPOSITOR.hex() + ":d1")
+    assert got["state"] == "open"
+    assert "does not cover" in got["reason"]
+    assert oracle.transfers == []
+
+
+def test_the_claim_deadline_is_derived_not_asked_for(direct_vm, warrant):
+    """A depositor says what they want covered; the headroom is the contract's job."""
+    got = open_deal(direct_vm, warrant, covers_until="2026-10-31")
+    assert got["covers_until"] == "2026-10-31"
+    assert got["deadline"] == "2026-11-01"

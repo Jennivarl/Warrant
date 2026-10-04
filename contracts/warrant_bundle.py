@@ -106,6 +106,32 @@ def _days_from_civil(year: int, month: int, day: int) -> int:
     day_of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
     day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
     return era * 146097 + day_of_era - 719468
+
+def end_of_day(day: str):
+    stamp = (day or '').strip()
+    if len(stamp) != 10:
+        return None
+    return epoch_seconds(stamp + 'T23:59:59Z')
+
+def next_day(day: str):
+    at = epoch_seconds((day or '').strip() + 'T12:00:00Z')
+    if at is None:
+        return None
+    return _civil_from_days(at // 86400 + 1)
+
+def _civil_from_days(days: int) -> str:
+    z = days + 719468
+    era = (z if z >= 0 else z - 146096) // 146097
+    day_of_era = z - era * 146097
+    year_of_era = (day_of_era - day_of_era // 1460 + day_of_era // 36524 - day_of_era // 146096) // 365
+    year = year_of_era + era * 400
+    day_of_year = day_of_era - (365 * year_of_era + year_of_era // 4 - year_of_era // 100)
+    mp = (5 * day_of_year + 2) // 153
+    day = day_of_year - (153 * mp + 2) // 5 + 1
+    month = mp + (3 if mp < 10 else -9)
+    if month <= 2:
+        year += 1
+    return f'{year:04d}-{month:02d}-{day:02d}'
 from dataclasses import dataclass
 import genlayer as gl
 from genlayer.types import *
@@ -123,6 +149,7 @@ class Deal:
     feed: str
     key: str
     conditions: str
+    covers_until: str
     deadline: str
     opened_at: str
     state: str
@@ -139,7 +166,7 @@ class Warrant(gl.contract.Contract):
         self.committed = 0
 
     @gl.public.write.payable
-    def open_deal(self, name: str, beneficiary: str, signal: str, feed_id: str, key: str, conditions: str, deadline: str) -> dict:
+    def open_deal(self, name: str, beneficiary: str, signal: str, feed_id: str, key: str, conditions: str, covers_until: str) -> dict:
         label = name.strip().lower()
         if not label or len(label) > 40:
             raise gl.vm.UserError('name the deal')
@@ -154,11 +181,14 @@ class Warrant(gl.contract.Contract):
             wanted = parse_conditions(conditions)
         except ValueError as bad:
             raise gl.vm.UserError(str(bad))
-        day = deadline.strip()
-        if not _valid_date(day):
-            raise gl.vm.UserError('deadline must be a YYYY-MM-DD date')
-        if day <= _today():
-            raise gl.vm.UserError('the deadline must be in the future')
+        covers = covers_until.strip()
+        if not _valid_date(covers):
+            raise gl.vm.UserError('the cover period must end on a YYYY-MM-DD date')
+        if covers < _today():
+            raise gl.vm.UserError('the cover period must not already be over')
+        claim_by = next_day(covers)
+        if claim_by is None:
+            raise gl.vm.UserError('the cover period must end on a YYYY-MM-DD date')
         paid_to = _address(beneficiary)
         if paid_to.as_hex.lower() == '0x' + '00' * 20:
             raise gl.vm.UserError('a payout to the zero address would burn the deposit')
@@ -172,7 +202,7 @@ class Warrant(gl.contract.Contract):
         for field, _op, _want in wanted:
             if field not in published:
                 raise gl.vm.UserError('that feed does not publish the field ' + field)
-        self.deals[deal_id] = Deal(depositor=depositor, beneficiary=paid_to, amount=amount, signal=signal_at, feed=fid, key=key.strip(), conditions=join_conditions(wanted), deadline=day, opened_at=_stamp(), state=STATE_OPEN, decided_at='', saw='', reason='')
+        self.deals[deal_id] = Deal(depositor=depositor, beneficiary=paid_to, amount=amount, signal=signal_at, feed=fid, key=key.strip(), conditions=join_conditions(wanted), covers_until=covers, deadline=claim_by, opened_at=_stamp(), state=STATE_OPEN, decided_at='', saw='', reason='')
         self.deal_ids.append(deal_id)
         self.committed = self.committed + amount
         return _as_dict(deal_id, self.deals[deal_id])
@@ -185,6 +215,8 @@ class Warrant(gl.contract.Contract):
         deal = self.deals[key]
         if deal.state != STATE_OPEN:
             raise gl.vm.UserError(f'deal is already {deal.state}: {key}')
+        if _today() > deal.deadline:
+            raise gl.vm.UserError(f'the deadline {deal.deadline} has passed; this deal can only be refunded: {key}')
         record = gl.contract.get_at(deal.signal).view().get_reading(deal.feed, deal.key)
         status = str(record['status'])
         if status != READ:
@@ -196,6 +228,11 @@ class Warrant(gl.contract.Contract):
             return self._undecided(key, deal, 'a timestamp on this deal or reading could not be read')
         if taken <= opened:
             return self._undecided(key, deal, 'the latest reading is older than this deal')
+        covers_to = end_of_day(deal.covers_until)
+        if covers_to is None:
+            return self._undecided(key, deal, 'the cover period on this deal could not be read')
+        if taken > covers_to:
+            return self._undecided(key, deal, 'the reading was taken after ' + deal.covers_until + ', which this deal does not cover')
         if now - taken < SETTLING_SECONDS:
             waited = now - taken
             return self._undecided(key, deal, f'the reading is {waited} seconds old and must be {SETTLING_SECONDS} before it can pay')
@@ -284,4 +321,4 @@ def _pay(to: Address, amount: int) -> None:
     _Wallet(to).emit_transfer(value=amount)
 
 def _as_dict(key: str, deal: Deal) -> dict:
-    return {'deal_id': key, 'depositor': deal.depositor.as_hex, 'beneficiary': deal.beneficiary.as_hex, 'amount': str(deal.amount), 'signal': deal.signal.as_hex, 'feed': deal.feed, 'key': deal.key, 'conditions': [{'field': f, 'op': o, 'want': w} for f, o, w in parse_conditions(deal.conditions)], 'deadline': deal.deadline, 'opened_at': deal.opened_at, 'state': deal.state, 'decided_at': deal.decided_at, 'saw': deal.saw, 'reason': deal.reason}
+    return {'deal_id': key, 'depositor': deal.depositor.as_hex, 'beneficiary': deal.beneficiary.as_hex, 'amount': str(deal.amount), 'signal': deal.signal.as_hex, 'feed': deal.feed, 'key': deal.key, 'conditions': [{'field': f, 'op': o, 'want': w} for f, o, w in parse_conditions(deal.conditions)], 'covers_until': deal.covers_until, 'deadline': deal.deadline, 'opened_at': deal.opened_at, 'state': deal.state, 'decided_at': deal.decided_at, 'saw': deal.saw, 'reason': deal.reason}

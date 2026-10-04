@@ -5,7 +5,7 @@
 //   export GENLAYER_PASSWORD=...           # never stored in this repo
 //
 //   node deploy/demo.mjs show
-//   node deploy/demo.mjs open    <name> <beneficiary> <feed_id> <key> <conditions> <deadline> <GEN>
+//   node deploy/demo.mjs open    <name> <beneficiary> <feed_id> <key> <conditions> <covers_until> <GEN>
 //   node deploy/demo.mjs release <deal_id>
 //   node deploy/demo.mjs refund  <deal_id>
 //
@@ -88,7 +88,9 @@ async function show() {
   for (const id of await view(WARRANT, "deal_list")) {
     const deal = await view(WARRANT, "get_deal", [id]);
     const conditions = deal.conditions.map((c) => `${c.field} ${c.op} ${c.want}`).join("; ");
-    console.log(`deal ${id} [${deal.state}] ${conditions} | saw ${deal.saw || "-"} | ${deal.reason || "-"}`);
+    console.log(
+      `deal ${id} [${deal.state}] ${conditions} | covers to ${deal.covers_until}, claim by ${deal.deadline} | saw ${deal.saw || "-"} | ${deal.reason || "-"}`
+    );
   }
 }
 
@@ -123,8 +125,10 @@ const [step, ...rest] = process.argv.slice(2);
 console.log("wallet", account.address, fmt(await balance(account.address)), "\n");
 
 if (step === "open") {
-  const [name, beneficiary, feed, key, conditions, deadline, amount] = rest;
-  await write("open_deal", [name, beneficiary, SIGNAL, feed, key, conditions, deadline], gen(amount));
+  // covers_until is the last day the fact may be read. The contract derives
+  // the claim deadline from it, one day later.
+  const [name, beneficiary, feed, key, conditions, coversUntil, amount] = rest;
+  await write("open_deal", [name, beneficiary, SIGNAL, feed, key, conditions, coversUntil], gen(amount));
 } else if (step === "release" || step === "refund") {
   const [dealId] = rest;
   const before = await view(WARRANT, "get_deal", [dealId]);

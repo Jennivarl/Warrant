@@ -27,6 +27,9 @@ The rules that protect the two sides:
                        payout cannot act on one consensus could still undo
     nothing stuck      after the deadline the depositor takes it back, so a
                        source that goes quiet cannot strand the money
+    one way out        `release` closes on the same boundary `refund` opens,
+                       so exactly one transition is ever available and the
+                       two can never race for the same deposit
     nobody squats      a deal id is namespaced by its depositor, so nobody
                        can open a deal under a name someone else is using
 
@@ -43,9 +46,11 @@ from genlayer.types import *
 from contracts.conditions import (
     READ,
     SETTLING_SECONDS,
+    end_of_day,
     epoch_seconds,
     evaluate,
     join_conditions,
+    next_day,
     parse_conditions,
 )
 
@@ -65,6 +70,10 @@ class Deal:
     key: str
     # "field op value; field op value", every one of which must hold.
     conditions: str
+    # The last day the fact may be read. The depositor's own choice.
+    covers_until: str
+    # The last day a claim may be made, derived as the day after the cover
+    # period so that every reading inside it has a full day to be claimed.
     deadline: str
     opened_at: str
     state: str
@@ -98,10 +107,14 @@ class Warrant(gl.contract.Contract):
         feed_id: str,
         key: str,
         conditions: str,
-        deadline: str,
+        covers_until: str,
     ) -> dict:
         """
         Lock the value sent against a set of conditions on one feed.
+
+        `covers_until` is the last day the fact may be read. The claim
+        deadline is one day later and the contract works it out, so nothing
+        is ever stranded by a reading that arrived late in the period.
 
         Conditions read "field op value; field op value", and all of them
         must hold: real cover asks more than one question at once, such as
@@ -128,11 +141,20 @@ class Warrant(gl.contract.Contract):
         except ValueError as bad:
             raise gl.vm.UserError(str(bad))
 
-        day = deadline.strip()
-        if not _valid_date(day):
-            raise gl.vm.UserError("deadline must be a YYYY-MM-DD date")
-        if day <= _today():
-            raise gl.vm.UserError("the deadline must be in the future")
+        covers = covers_until.strip()
+        if not _valid_date(covers):
+            raise gl.vm.UserError("the cover period must end on a YYYY-MM-DD date")
+        if covers < _today():
+            raise gl.vm.UserError("the cover period must not already be over")
+        # The claim deadline is derived rather than asked for. A reading needs
+        # time to settle before it can pay, so a depositor who was asked for
+        # the deadline directly would have to leave that headroom by hand, and
+        # a reading taken late on the last covered day could never pay. One
+        # extra day gives every reading inside the cover period a full day to
+        # be claimed, and the depositor only has to say what they want covered.
+        claim_by = next_day(covers)
+        if claim_by is None:
+            raise gl.vm.UserError("the cover period must end on a YYYY-MM-DD date")
 
         paid_to = _address(beneficiary)
         if paid_to.as_hex.lower() == "0x" + "00" * 20:
@@ -160,7 +182,8 @@ class Warrant(gl.contract.Contract):
             feed=fid,
             key=key.strip(),
             conditions=join_conditions(wanted),
-            deadline=day,
+            covers_until=covers,
+            deadline=claim_by,
             opened_at=_stamp(),
             state=STATE_OPEN,
             decided_at="",
@@ -184,9 +207,13 @@ class Warrant(gl.contract.Contract):
         questions were fixed when the deposit was made, and the answer comes
         out of SIGNAL's storage rather than from whoever made this call.
 
-        Returns the deal either way. A condition that does not hold leaves it
-        open with the reason recorded, so the only thing a caller can achieve
-        by calling early is to be told what is still missing.
+        Returns the deal either way while the deal is still live. A condition
+        that does not hold leaves it open with the reason recorded, so the
+        only thing a caller can achieve by calling early is to be told what is
+        still missing.
+
+        Refused outright once the deadline has passed: from that moment the
+        deposit belongs to the depositor and `refund` is the only way out.
         """
         key = deal_id.strip().lower()
         if key not in self.deals:
@@ -194,6 +221,17 @@ class Warrant(gl.contract.Contract):
         deal = self.deals[key]
         if deal.state != STATE_OPEN:
             raise gl.vm.UserError(f"deal is already {deal.state}: {key}")
+        # Past the deadline a deal can only be refunded. `refund` opens
+        # strictly after the deadline day and this closes on exactly the same
+        # boundary, so the two transitions are complementary rather than
+        # overlapping: at any moment exactly one of them is available, and
+        # there is never a window where whoever calls first decides where the
+        # money goes. Checked before SIGNAL is consulted, because an expired
+        # deal has no question left to ask.
+        if _today() > deal.deadline:
+            raise gl.vm.UserError(
+                f"the deadline {deal.deadline} has passed; this deal can only be refunded: {key}"
+            )
 
         # The default storage view, not the finalized one. Asking for
         # StorageView.LATEST_FINALIZED is the natural way to refuse a reading
@@ -219,6 +257,16 @@ class Warrant(gl.contract.Contract):
         # A reading taken before this deal existed says nothing about it.
         if taken <= opened:
             return self._undecided(key, deal, "the latest reading is older than this deal")
+        # The fact has to have been read inside the period that was bought.
+        # A later reading says something true about the world and nothing
+        # about this deal.
+        covers_to = end_of_day(deal.covers_until)
+        if covers_to is None:
+            return self._undecided(key, deal, "the cover period on this deal could not be read")
+        if taken > covers_to:
+            return self._undecided(
+                key, deal, "the reading was taken after " + deal.covers_until + ", which this deal does not cover"
+            )
         if now - taken < SETTLING_SECONDS:
             waited = now - taken
             return self._undecided(
@@ -366,6 +414,7 @@ def _as_dict(key: str, deal: Deal) -> dict:
         "conditions": [
             {"field": f, "op": o, "want": w} for f, o, w in parse_conditions(deal.conditions)
         ],
+        "covers_until": deal.covers_until,
         "deadline": deal.deadline,
         "opened_at": deal.opened_at,
         "state": deal.state,

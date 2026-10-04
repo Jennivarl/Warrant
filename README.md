@@ -2,13 +2,13 @@
 
 Money that moves only on a fact consensus derived.
 
-A deposit names, once and for all, the exact questions that release it: which SIGNAL contract, which feed, which key, which conditions, who gets paid, and by when. After that nobody contributes anything.
+A deposit names, once and for all, the exact questions that release it: which SIGNAL contract, which feed, which key, which conditions, who gets paid, and what period is covered. After that nobody contributes anything.
 
 ```
-open_deal(name, beneficiary, signal, feed_id, key, conditions, deadline)   payable
-release(deal_id)                                                          pay, or say why not
-refund(deal_id)                                                           take it back after the deadline
-get_deal(deal_id)                                                         free view
+open_deal(name, beneficiary, signal, feed_id, key, conditions, covers_until)  payable
+release(deal_id)                                                             pay, or say why not
+refund(deal_id)                                                              take it back after the deadline
+get_deal(deal_id)                                                            free view
 ```
 
 `release` takes no argument but the deal's own name. It reads the attested record out of [SIGNAL](https://github.com/Jennivarl/Signal) and either the stored values satisfy every condition or they do not. There is no oracle to call, no signature to supply, and no caller input that can change the answer.
@@ -17,12 +17,13 @@ That last part is the point. An escrow that accepts a value from whoever trigger
 
 | | |
 |---|---|
-| Contract | [`0xD0d27F022B771c96124Df2F5467bb99e744082a1`](https://explorer-studio-dev.genlayer.com/address/0xD0d27F022B771c96124Df2F5467bb99e744082a1) |
+| Contract | [`0x91D94D7281baFc3513c536810779B6b34D710Dd9`](https://explorer-studio-dev.genlayer.com/address/0x91D94D7281baFc3513c536810779B6b34D710Dd9) |
 | Reads facts from | SIGNAL at [`0xb4EA63892D4F8eA3D552486541CE4Deb6Db596BC`](https://explorer-studio-dev.genlayer.com/address/0xb4EA63892D4F8eA3D552486541CE4Deb6Db596BC) |
 | Network | GenLayer Studio Next, chain id 61997, `https://studio-next.genlayer.com/api` |
 | Engine | Consensus v0.6, GenVM v0.3, runner `py-genlayer:5jycge...` |
-| Tests | 134, `python -m pytest -q` |
-| Deployed source | byte-identical to [`contracts/warrant_bundle.py`](contracts/warrant_bundle.py), sha256 `cebc7c42...`, checked by `node deploy/verify.mjs` |
+| Tests | 148, `python -m pytest -q` |
+| Live page | [jennivarl.github.io/Warrant](https://jennivarl.github.io/Warrant/), which reads both contracts in your browser |
+| Deployed source | byte-identical to [`contracts/warrant_bundle.py`](contracts/warrant_bundle.py), sha256 `8f96563b...`, checked by `node deploy/verify.mjs` |
 
 ---
 
@@ -35,6 +36,7 @@ That last part is the point. An escrow that accepts a value from whoever trigger
 | nothing stale | the reading must be newer than the deposit, so a record taken before the deal existed cannot trigger it |
 | nothing unsettled | the reading must have existed for an hour, so a payout cannot act on one consensus could still undo |
 | nothing stuck | after the deadline the depositor takes it back, so a source that goes quiet cannot strand the money |
+| one way out | `release` closes on exactly the boundary `refund` opens, so one and only one transition is ever available and the two can never race for the same deposit |
 | nobody squats | a deal id is namespaced by its depositor, so nobody can open a deal under a name someone else is using |
 | no burn | a payout to the zero address is refused at the counter |
 | no typo that means "never" | every condition's field is checked against SIGNAL's published fields when the deal is opened |
@@ -120,6 +122,38 @@ The beneficiary `0x0f358a8ae1EFc8eBf5a456bf92101f4d33Da33bE` was a freshly gener
 
 ---
 
+## One way out at a time, and nothing stranded
+
+Two rules have to hold together, and naively they fight each other.
+
+A deposit must never be claimable by both sides at once, so `release` has to close on exactly the boundary `refund` opens. And a reading needs an hour to settle before it can pay, so that value never moves on a reading consensus could still take back.
+
+Put those together with a deadline the depositor types in, and the last hour before it becomes dead: a reading that arrives then can never settle in time, and a deposit that should have paid refunds instead.
+
+So the deadline is not asked for. The depositor says what period they want covered, and the contract derives the claim deadline one day later:
+
+```
+open_deal(..., covers_until="2026-10-31")   ->   covers to 2026-10-31, claim by 2026-11-01
+```
+
+| moment | release | refund |
+|---|---|---|
+| during the cover period | open | shut |
+| the claim day after it | open | shut |
+| from midnight after that, forever | shut | open |
+
+That gives three properties, each held by tests:
+
+- **Exactly one transition is available at any moment.** Never both, so the two can never race for the same deposit. Never neither, so a deposit is always claimable by someone. The suite sweeps that boundary with a fresh deal at each instant.
+- **Nothing inside the cover period is ever stranded.** A reading taken in the final second of the period still settles an hour later and has the rest of the claim day to be paid. Tested from the first second of cover to the last.
+- **A reading taken after the period cannot pay.** It may be perfectly true about the world, and it says nothing about this deal. The deal's own terms decide what counts, not when somebody happens to call `release`.
+
+An expired deal is refused before SIGNAL is even consulted, so it costs no cross-contract call and no late reading can influence it.
+
+The date arithmetic this rests on is integer only with no library, because every validator has to produce the same answer. It is checked against the standard library on every day from 2020 to 2031.
+
+---
+
 ## Paying a wallet needs the fee reserved up front
 
 This is the part that is easy to get wrong, and getting it wrong is how an escrow ends up recording a payout it never made.
@@ -147,7 +181,7 @@ node deploy/verify.mjs
 ```
 
 ```
-contract       0xD0d27F022B771c96124Df2F5467bb99e744082a1
+contract       0x91D94D7281baFc3513c536810779B6b34D710Dd9
 deploy tx      0x4d14dbeb1c538f4c9c3743c54e5b5eb41724b021ed8ee2b2bc5bfcd4374a805a
 on chain       11242 bytes, sha256 cebc7c4202638525e0c1ae9f97f919b75b7f41e77e63b9fd7c109c5413578754
 in this repo   11242 bytes, sha256 cebc7c4202638525e0c1ae9f97f919b75b7f41e77e63b9fd7c109c5413578754
@@ -170,12 +204,24 @@ IDENTICAL
 
 ---
 
+## The live page
+
+[jennivarl.github.io/Warrant](https://jennivarl.github.io/Warrant/) shows the whole loop with nothing cached: the three statuses SIGNAL can record, the deal and its conditions, and the payout. Every value on it is read from the chain in the visitor's browser when the page loads, so it cannot drift from what the contracts actually say.
+
+It is one HTML file with no build step, which is deliberate. There is no toolchain to rot, and nothing that can go stale between a deploy and the chain.
+
+```sh
+cd site && python -m http.server 8000     # or just open index.html
+```
+
+---
+
 ## Running it
 
 ```sh
 python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
 python -m deploy.build_bundle          # contracts/warrant_bundle.py, the file that deploys
-python -m pytest -q                    # 134 tests, no chain and no network
+python -m pytest -q                    # 148 tests, no chain and no network
 ```
 
 Direct mode loads one contract per process, so SIGNAL is answered in the tests by a stub that speaks the same cross-contract protocol the chain uses: the contract really does call out, and the reply really is calldata encoded. What the stub buys is states that are tedious to produce for real, including a reading that is stale, absent, unreadable, too fresh, or carrying a timestamp that cannot be parsed.
@@ -207,7 +253,8 @@ deploy/chain.mjs              network and signing, in one place
 deploy/deploy.mjs             deploy the bundle
 deploy/demo.mjs               open, release and refund against a live copy
 deploy/verify.mjs             prove the live contract runs this exact bundle
-test/                         134 tests
+site/index.html               the live page, one file, no build step
+test/                         148 tests
 ```
 
 GenVM loads a single source file with no access to siblings, so the bundle exists to paste the modules together. Comments and docstrings are stripped from the deployed copy, because a deploy costs gas per byte and a bundle over the cap returns a transaction hash and then simply does not exist. Edit the modules, never the bundle: a test regenerates it and fails if the committed copy has drifted.

@@ -234,3 +234,50 @@ def _days_from_civil(year: int, month: int, day: int) -> int:
     day_of_year = (153 * (month + (-3 if month > 2 else 9)) + 2) // 5 + day - 1
     day_of_era = year_of_era * 365 + year_of_era // 4 - year_of_era // 100 + day_of_year
     return era * 146097 + day_of_era - 719468
+
+
+def end_of_day(day: str):
+    """
+    The last second of a calendar day, as epoch seconds, or None.
+
+    A cover period is given in whole days, and the question "was this read
+    inside the period" has to be asked against a precise instant.
+    """
+    stamp = (day or "").strip()
+    if len(stamp) != 10:
+        return None
+    return epoch_seconds(stamp + "T23:59:59Z")
+
+
+def next_day(day: str):
+    """
+    The calendar day after this one, as YYYY-MM-DD, or None.
+
+    Used once, to derive a deal's claim deadline from its cover period, so
+    the depositor never has to leave headroom by hand.
+    """
+    at = epoch_seconds((day or "").strip() + "T12:00:00Z")
+    if at is None:
+        return None
+    return _civil_from_days(at // 86400 + 1)
+
+
+def _civil_from_days(days: int) -> str:
+    """
+    The inverse of _days_from_civil, by the same era arithmetic.
+
+    Integer only and no library, because every validator has to produce the
+    same string.
+    """
+    z = days + 719468
+    era = (z if z >= 0 else z - 146096) // 146097
+    day_of_era = z - era * 146097
+    year_of_era = (day_of_era - day_of_era // 1460 + day_of_era // 36524 - day_of_era // 146096) // 365
+    year = year_of_era + era * 400
+    day_of_year = day_of_era - (365 * year_of_era + year_of_era // 4 - year_of_era // 100)
+    mp = (5 * day_of_year + 2) // 153
+    day = day_of_year - (153 * mp + 2) // 5 + 1
+    month = mp + (3 if mp < 10 else -9)
+    if month <= 2:
+        year += 1
+    return f"{year:04d}-{month:02d}-{day:02d}"
